@@ -385,17 +385,23 @@ export class IntuisScheduleCard extends LitElement {
             <div class="editor-section">
               <label>Start Time</label>
               <input
-                type="time"
+                type="text"
+                class="time-input"
+                placeholder="HH:MM"
+                pattern="[0-2][0-9]:[0-5][0-9]"
                 .value=${this._editor.startTime}
-                @change=${(e: Event) => this._handleTimeChange('startTime', (e.target as HTMLInputElement).value)}
+                @input=${(e: Event) => this._handleTimeChange('startTime', (e.target as HTMLInputElement).value)}
               />
             </div>
             <div class="editor-section">
               <label>End Time</label>
               <input
-                type="time"
-                .value=${this._editor.endTime === '24:00' ? '00:00' : this._editor.endTime}
-                @change=${(e: Event) => this._handleTimeChange('endTime', (e.target as HTMLInputElement).value)}
+                type="text"
+                class="time-input"
+                placeholder="HH:MM"
+                pattern="[0-2][0-9]:[0-5][0-9]"
+                .value=${this._editor.endTime}
+                @input=${(e: Event) => this._handleTimeChange('endTime', (e.target as HTMLInputElement).value)}
               />
             </div>
           </div>
@@ -633,14 +639,17 @@ export class IntuisScheduleCard extends LitElement {
       color: var(--secondary-text-color);
     }
 
-    .editor-section input[type="time"] {
+    .time-input {
       width: 100%;
       padding: 10px;
       border: 1px solid var(--divider-color);
       border-radius: 8px;
-      font-size: 1em;
+      font-size: 1.1em;
+      font-family: monospace;
+      text-align: center;
       background: var(--card-background-color);
       color: var(--primary-text-color);
+      box-sizing: border-box;
     }
 
     .zone-options {
