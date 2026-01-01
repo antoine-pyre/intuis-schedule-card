@@ -8,19 +8,35 @@ import {
   DAYS_OF_WEEK,
   DayOfWeek,
   DAY_INDEX,
-  ZoneSelectorState,
 } from './types/types';
-import { generateTimeSlots, isCurrentTimeSlot, getShortDayName } from './utils/time';
-import { getZoneColor, getContrastTextColor, createZoneColorStyles } from './utils/colors';
+import { getZoneColor, getContrastTextColor } from './utils/colors';
 
 // Default configuration values
 const DEFAULT_CONFIG: Partial<IntuisScheduleCardConfig> = {
-  time_step: 60,
   start_hour: 0,
-  end_hour: 23,
+  end_hour: 24,
   show_temperatures: true,
-  compact: false,
 };
+
+// Block represents a continuous time range with the same zone
+interface ScheduleBlock {
+  zone: Zone;
+  startTime: string; // HH:MM
+  endTime: string;   // HH:MM
+  startMinutes: number;
+  endMinutes: number;
+}
+
+// Editor state for time range editing
+interface BlockEditorState {
+  open: boolean;
+  day: DayOfWeek | null;
+  dayIndex: number;
+  block: ScheduleBlock | null;
+  startTime: string;
+  endTime: string;
+  selectedZoneId: number | null;
+}
 
 @customElement('intuis-schedule-card')
 export class IntuisScheduleCard extends LitElement {
@@ -28,16 +44,16 @@ export class IntuisScheduleCard extends LitElement {
   @state() private _config?: IntuisScheduleCardConfig;
   @state() private _loading = false;
   @state() private _error?: string;
-  @state() private _zoneSelector: ZoneSelectorState = {
+  @state() private _editor: BlockEditorState = {
     open: false,
     day: null,
     dayIndex: 0,
-    time: '',
+    block: null,
+    startTime: '',
+    endTime: '',
+    selectedZoneId: null,
   };
 
-  /**
-   * Set card configuration
-   */
   public setConfig(config: IntuisScheduleCardConfig): void {
     if (!config.entity) {
       throw new Error('You need to define an entity');
@@ -45,138 +61,154 @@ export class IntuisScheduleCard extends LitElement {
     this._config = { ...DEFAULT_CONFIG, ...config };
   }
 
-  /**
-   * Get card size for layout purposes
-   */
   public getCardSize(): number {
-    const config = this._config;
-    if (!config) return 6;
-
-    const timeSlots = generateTimeSlots(
-      config.start_hour ?? 0,
-      config.end_hour ?? 23,
-      config.time_step ?? 60
-    );
-    // Base size + rows
-    return Math.ceil(timeSlots.length / 2) + 2;
+    return 8;
   }
 
-  /**
-   * Performance optimization: only update when entity changes
-   */
   protected shouldUpdate(changedProps: PropertyValues): boolean {
     if (!this._config) return true;
-
     if (changedProps.has('hass') && this.hass) {
       const oldHass = changedProps.get('hass') as HomeAssistant | undefined;
       if (!oldHass) return true;
-
       const entityId = this._config.entity;
       return oldHass.states[entityId] !== this.hass.states[entityId];
     }
-
     return true;
   }
 
-  /**
-   * Get schedule attributes from entity
-   */
   private _getScheduleAttributes(): ScheduleSummaryAttributes | null {
     if (!this.hass || !this._config) return null;
-
     const entityState = this.hass.states[this._config.entity];
     if (!entityState) {
       this._error = `Entity ${this._config.entity} not found`;
       return null;
     }
-
     return entityState.attributes as unknown as ScheduleSummaryAttributes;
   }
 
   /**
-   * Get zone for a specific day and time
+   * Convert timetable entries for a day into blocks
    */
-  private _getZoneForSlot(
-    attrs: ScheduleSummaryAttributes,
-    day: DayOfWeek,
-    time: string
-  ): Zone | null {
-    const dayTimetable = attrs.weekly_timetable[day];
-    if (!dayTimetable || dayTimetable.length === 0) return null;
+  private _getDayBlocks(attrs: ScheduleSummaryAttributes, day: DayOfWeek): ScheduleBlock[] {
+    const blocks: ScheduleBlock[] = [];
+    const dayTimetable = attrs.weekly_timetable[day] || [];
+    const dayIndex = DAY_INDEX[day];
 
-    // Find the zone active at this time
-    // The timetable entries mark zone starts, so we need to find
-    // the most recent entry before or at this time
-    let activeZoneName: string | null = null;
+    // Get the zone that's active at the start of the day (from previous day's last entry)
+    const prevDayIndex = dayIndex === 0 ? 6 : dayIndex - 1;
+    const prevDay = DAYS_OF_WEEK[prevDayIndex];
+    const prevDayTimetable = attrs.weekly_timetable[prevDay] || [];
 
-    const timeMinutes = this._parseTime(time);
+    let currentZoneName: string | null = null;
+    if (prevDayTimetable.length > 0) {
+      currentZoneName = prevDayTimetable[prevDayTimetable.length - 1].zone;
+    } else if (dayTimetable.length > 0) {
+      currentZoneName = dayTimetable[0].zone;
+    }
 
+    // Build list of transitions for this day
+    const transitions: { time: string; zoneName: string; minutes: number }[] = [];
+
+    // Add start of day if no entry at 00:00
+    if (dayTimetable.length === 0 || dayTimetable[0].time !== '00:00') {
+      if (currentZoneName) {
+        transitions.push({ time: '00:00', zoneName: currentZoneName, minutes: 0 });
+      }
+    }
+
+    // Add all timetable entries for this day
     for (const entry of dayTimetable) {
-      const entryMinutes = this._parseTime(entry.time);
-      if (entryMinutes <= timeMinutes) {
-        activeZoneName = entry.zone;
-      } else {
-        break;
+      const [h, m] = entry.time.split(':').map(Number);
+      transitions.push({ time: entry.time, zoneName: entry.zone, minutes: h * 60 + m });
+    }
+
+    // Sort by time
+    transitions.sort((a, b) => a.minutes - b.minutes);
+
+    // Convert transitions to blocks
+    for (let i = 0; i < transitions.length; i++) {
+      const start = transitions[i];
+      const end = transitions[i + 1] || { time: '24:00', minutes: 24 * 60 };
+
+      const zone = attrs.zones.find(z => z.name === start.zoneName);
+      if (zone) {
+        blocks.push({
+          zone,
+          startTime: start.time,
+          endTime: end.time === '24:00' ? '00:00' : end.time,
+          startMinutes: start.minutes,
+          endMinutes: end.minutes,
+        });
       }
     }
 
-    // If no zone found for this time (before first entry of the day),
-    // we need to look at the previous day's last entry
-    if (!activeZoneName) {
-      const dayIndex = DAY_INDEX[day];
-      const prevDayIndex = dayIndex === 0 ? 6 : dayIndex - 1;
-      const prevDay = DAYS_OF_WEEK[prevDayIndex];
-      const prevDayTimetable = attrs.weekly_timetable[prevDay];
-
-      if (prevDayTimetable && prevDayTimetable.length > 0) {
-        activeZoneName = prevDayTimetable[prevDayTimetable.length - 1].zone;
-      }
-    }
-
-    if (!activeZoneName) return null;
-
-    // Find the zone object by name
-    return attrs.zones.find((z) => z.name === activeZoneName) || null;
+    return blocks;
   }
 
   /**
-   * Parse time string to minutes
+   * Handle block click - open editor
    */
-  private _parseTime(time: string): number {
-    const [hours, minutes] = time.split(':').map(Number);
-    return hours * 60 + minutes;
-  }
-
-  /**
-   * Handle cell click - open zone selector
-   */
-  private _handleCellClick(day: DayOfWeek, time: string): void {
-    this._zoneSelector = {
+  private _handleBlockClick(day: DayOfWeek, block: ScheduleBlock): void {
+    this._editor = {
       open: true,
       day,
       dayIndex: DAY_INDEX[day],
-      time,
+      block,
+      startTime: block.startTime,
+      endTime: block.endTime === '00:00' ? '24:00' : block.endTime,
+      selectedZoneId: block.zone.id,
     };
   }
 
   /**
-   * Handle zone selection
+   * Handle zone selection in editor
    */
-  private async _handleZoneSelect(zone: Zone): Promise<void> {
-    if (!this.hass || !this._zoneSelector.day) return;
+  private _handleZoneSelect(zoneId: number): void {
+    this._editor = { ...this._editor, selectedZoneId: zoneId };
+  }
+
+  /**
+   * Handle time change in editor
+   */
+  private _handleTimeChange(field: 'startTime' | 'endTime', value: string): void {
+    this._editor = { ...this._editor, [field]: value };
+  }
+
+  /**
+   * Apply the block edit
+   */
+  private async _applyEdit(): Promise<void> {
+    if (!this.hass || !this._editor.day || this._editor.selectedZoneId === null) return;
 
     this._loading = true;
     this._error = undefined;
 
     try {
+      // Call service to set the zone at the start time
       await this.hass.callService('intuis_connect', 'set_schedule_slot', {
-        day: this._zoneSelector.dayIndex,
-        start_time: this._zoneSelector.time,
-        zone_id: zone.id,
+        day: this._editor.dayIndex,
+        start_time: this._editor.startTime,
+        zone_id: this._editor.selectedZoneId,
       });
 
-      // Close selector
-      this._zoneSelector = { open: false, day: null, dayIndex: 0, time: '' };
+      // If end time is different from original block's end time,
+      // we need to set what comes after this block
+      const originalEndTime = this._editor.block?.endTime === '00:00' ? '24:00' : this._editor.block?.endTime;
+      const newEndTime = this._editor.endTime === '00:00' ? '24:00' : this._editor.endTime;
+
+      if (originalEndTime && newEndTime && newEndTime !== originalEndTime && newEndTime !== '24:00') {
+        // Restore the original zone at the new end time
+        // This handles the case where user shortens a block
+        if (this._editor.block?.zone.id) {
+          await this.hass.callService('intuis_connect', 'set_schedule_slot', {
+            day: this._editor.dayIndex,
+            start_time: this._editor.endTime,
+            zone_id: this._editor.block.zone.id,
+          });
+        }
+      }
+
+      this._closeEditor();
     } catch (err) {
       this._error = err instanceof Error ? err.message : 'Failed to update schedule';
     } finally {
@@ -185,15 +217,20 @@ export class IntuisScheduleCard extends LitElement {
   }
 
   /**
-   * Close zone selector
+   * Close editor
    */
-  private _closeZoneSelector(): void {
-    this._zoneSelector = { open: false, day: null, dayIndex: 0, time: '' };
+  private _closeEditor(): void {
+    this._editor = {
+      open: false,
+      day: null,
+      dayIndex: 0,
+      block: null,
+      startTime: '',
+      endTime: '',
+      selectedZoneId: null,
+    };
   }
 
-  /**
-   * Render the card
-   */
   protected render(): TemplateResult {
     if (!this._config) {
       return html`<ha-card><div class="error">Card not configured</div></ha-card>`;
@@ -208,36 +245,19 @@ export class IntuisScheduleCard extends LitElement {
       `;
     }
 
-    const timeSlots = generateTimeSlots(
-      this._config.start_hour ?? 0,
-      this._config.end_hour ?? 23,
-      this._config.time_step ?? 60
-    );
-
-    const compact = this._config.compact ?? false;
-
     return html`
       <ha-card>
-        <style>
-          :host {
-            ${createZoneColorStyles(attrs.zones, this._config.zone_colors)}
-          }
-        </style>
-
         ${this._renderHeader(attrs)}
-        ${this._renderGrid(attrs, timeSlots, compact)}
+        ${this._renderSchedule(attrs)}
         ${this._renderLegend(attrs)}
-        ${this._zoneSelector.open ? this._renderZoneSelector(attrs) : nothing}
+        ${this._editor.open ? this._renderEditor(attrs) : nothing}
         ${this._loading ? this._renderLoading() : nothing}
-        ${this._error ? this._renderError() : nothing}
+        ${this._error && !this._editor.open ? this._renderError() : nothing}
       </ha-card>
     `;
   }
 
-  /**
-   * Render card header
-   */
-  private _renderHeader(_attrs: ScheduleSummaryAttributes): TemplateResult {
+  private _renderHeader(attrs: ScheduleSummaryAttributes): TemplateResult {
     const title = this._config?.title || 'Heating Schedule';
     const scheduleName = this.hass?.states[this._config!.entity]?.state || 'Unknown';
 
@@ -249,63 +269,83 @@ export class IntuisScheduleCard extends LitElement {
     `;
   }
 
-  /**
-   * Render the schedule grid
-   */
-  private _renderGrid(
-    attrs: ScheduleSummaryAttributes,
-    timeSlots: string[],
-    compact: boolean
-  ): TemplateResult {
-    const step = this._config?.time_step ?? 60;
+  private _renderSchedule(attrs: ScheduleSummaryAttributes): TemplateResult {
+    const startHour = this._config?.start_hour ?? 0;
+    const endHour = this._config?.end_hour ?? 24;
+    const totalMinutes = (endHour - startHour) * 60;
 
     return html`
-      <div class="grid-container ${compact ? 'compact' : ''}">
-        <div class="grid">
-          <!-- Header row -->
-          <div class="grid-header">
-            <div class="time-label"></div>
-            ${DAYS_OF_WEEK.map(
-              (day) => html`
-                <div class="day-header">${compact ? getShortDayName(day) : day}</div>
-              `
-            )}
+      <div class="schedule-container">
+        <!-- Time axis -->
+        <div class="time-axis">
+          <div class="day-label"></div>
+          <div class="time-labels">
+            ${this._renderTimeLabels(startHour, endHour)}
           </div>
+        </div>
 
-          <!-- Time rows -->
-          ${timeSlots.map(
-            (time) => html`
-              <div class="grid-row">
-                <div class="time-label">${time}</div>
-                ${DAYS_OF_WEEK.map((day) => {
-                  const zone = this._getZoneForSlot(attrs, day, time);
-                  const isCurrent = isCurrentTimeSlot(day, time, step);
-                  const bgColor = zone
-                    ? getZoneColor(zone, this._config?.zone_colors, attrs.zones.indexOf(zone))
-                    : '#e5e7eb';
-                  const textColor = getContrastTextColor(bgColor);
+        <!-- Days -->
+        ${DAYS_OF_WEEK.map(day => this._renderDayRow(attrs, day, startHour, totalMinutes))}
+      </div>
+    `;
+  }
 
-                  return html`
-                    <div
-                      class="grid-cell ${isCurrent ? 'current' : ''}"
-                      style="background-color: ${bgColor}; color: ${textColor}"
-                      @click=${() => this._handleCellClick(day, time)}
-                      title="${zone?.name || 'Not set'} - Click to change"
-                    >
-                    </div>
-                  `;
-                })}
+  private _renderTimeLabels(startHour: number, endHour: number): TemplateResult {
+    const labels: TemplateResult[] = [];
+    for (let h = startHour; h <= endHour; h += 2) {
+      const left = ((h - startHour) / (endHour - startHour)) * 100;
+      labels.push(html`
+        <span class="time-label" style="left: ${left}%">${h.toString().padStart(2, '0')}:00</span>
+      `);
+    }
+    return html`${labels}`;
+  }
+
+  private _renderDayRow(
+    attrs: ScheduleSummaryAttributes,
+    day: DayOfWeek,
+    startHour: number,
+    totalMinutes: number
+  ): TemplateResult {
+    const blocks = this._getDayBlocks(attrs, day);
+    const startMinutes = startHour * 60;
+    const shortDay = day.substring(0, 3);
+
+    return html`
+      <div class="day-row">
+        <div class="day-label">${shortDay}</div>
+        <div class="blocks-container">
+          ${blocks.map(block => {
+            // Calculate position and width based on visible time range
+            const blockStart = Math.max(block.startMinutes, startMinutes);
+            const blockEnd = Math.min(block.endMinutes, startMinutes + totalMinutes);
+
+            if (blockEnd <= blockStart) return nothing;
+
+            const left = ((blockStart - startMinutes) / totalMinutes) * 100;
+            const width = ((blockEnd - blockStart) / totalMinutes) * 100;
+
+            const color = getZoneColor(block.zone, this._config?.zone_colors, attrs.zones.indexOf(block.zone));
+            const textColor = getContrastTextColor(color);
+            const duration = blockEnd - blockStart;
+            const showLabel = width > 8; // Only show label if block is wide enough
+
+            return html`
+              <div
+                class="block"
+                style="left: ${left}%; width: ${width}%; background-color: ${color}; color: ${textColor}"
+                @click=${() => this._handleBlockClick(day, block)}
+                title="${block.zone.name}: ${block.startTime} - ${block.endTime === '00:00' ? '24:00' : block.endTime}"
+              >
+                ${showLabel ? html`<span class="block-label">${block.zone.name}</span>` : nothing}
               </div>
-            `
-          )}
+            `;
+          })}
         </div>
       </div>
     `;
   }
 
-  /**
-   * Render zone legend
-   */
   private _renderLegend(attrs: ScheduleSummaryAttributes): TemplateResult {
     return html`
       <div class="legend">
@@ -314,15 +354,10 @@ export class IntuisScheduleCard extends LitElement {
           const textColor = getContrastTextColor(color);
 
           return html`
-            <div
-              class="legend-item"
-              style="background-color: ${color}; color: ${textColor}"
-            >
+            <div class="legend-item" style="background-color: ${color}; color: ${textColor}">
               ${zone.name}
               ${this._config?.show_temperatures
-                ? html`<span class="legend-temp">
-                    ${this._getAverageTemp(zone)}°
-                  </span>`
+                ? html`<span class="legend-temp">${this._getAverageTemp(zone)}°</span>`
                 : nothing}
             </div>
           `;
@@ -331,60 +366,70 @@ export class IntuisScheduleCard extends LitElement {
     `;
   }
 
-  /**
-   * Get average temperature for a zone
-   */
   private _getAverageTemp(zone: Zone): number {
     const temps = Object.values(zone.room_temperatures);
     if (temps.length === 0) return 0;
     return Math.round(temps.reduce((a, b) => a + b, 0) / temps.length);
   }
 
-  /**
-   * Render zone selector dialog
-   */
-  private _renderZoneSelector(attrs: ScheduleSummaryAttributes): TemplateResult {
+  private _renderEditor(attrs: ScheduleSummaryAttributes): TemplateResult {
     return html`
-      <div class="zone-selector-overlay" @click=${this._closeZoneSelector}>
-        <div class="zone-selector" @click=${(e: Event) => e.stopPropagation()}>
-          <div class="zone-selector-header">
-            <span>Select Zone</span>
-            <span class="zone-selector-time">
-              ${this._zoneSelector.day} ${this._zoneSelector.time}
-            </span>
+      <div class="editor-overlay" @click=${this._closeEditor}>
+        <div class="editor" @click=${(e: Event) => e.stopPropagation()}>
+          <div class="editor-header">
+            <span class="editor-title">Edit Schedule</span>
+            <span class="editor-day">${this._editor.day}</span>
           </div>
-          <div class="zone-selector-options">
-            ${attrs.zones.map((zone, index) => {
-              const color = getZoneColor(zone, this._config?.zone_colors, index);
-              const textColor = getContrastTextColor(color);
 
-              return html`
-                <button
-                  class="zone-option"
-                  style="background-color: ${color}; color: ${textColor}"
-                  @click=${() => this._handleZoneSelect(zone)}
-                >
-                  <span class="zone-option-name">${zone.name}</span>
-                  <span class="zone-option-temps">
-                    ${Object.values(zone.room_temperatures)
-                      .map((t) => `${t}°`)
-                      .join(' / ')}
-                  </span>
-                </button>
-              `;
-            })}
+          <div class="editor-times">
+            <div class="editor-section">
+              <label>Start Time</label>
+              <input
+                type="time"
+                .value=${this._editor.startTime}
+                @change=${(e: Event) => this._handleTimeChange('startTime', (e.target as HTMLInputElement).value)}
+              />
+            </div>
+            <div class="editor-section">
+              <label>End Time</label>
+              <input
+                type="time"
+                .value=${this._editor.endTime === '24:00' ? '00:00' : this._editor.endTime}
+                @change=${(e: Event) => this._handleTimeChange('endTime', (e.target as HTMLInputElement).value)}
+              />
+            </div>
           </div>
-          <button class="zone-selector-cancel" @click=${this._closeZoneSelector}>
-            Cancel
-          </button>
+
+          <div class="editor-section">
+            <label>Zone</label>
+            <div class="zone-options">
+              ${attrs.zones.map((zone, index) => {
+                const color = getZoneColor(zone, this._config?.zone_colors, index);
+                const textColor = getContrastTextColor(color);
+                const isSelected = this._editor.selectedZoneId === zone.id;
+
+                return html`
+                  <button
+                    class="zone-option ${isSelected ? 'selected' : ''}"
+                    style="background-color: ${color}; color: ${textColor}"
+                    @click=${() => this._handleZoneSelect(zone.id)}
+                  >
+                    ${zone.name}
+                  </button>
+                `;
+              })}
+            </div>
+          </div>
+
+          <div class="editor-actions">
+            <button class="btn-cancel" @click=${this._closeEditor}>Cancel</button>
+            <button class="btn-apply" @click=${this._applyEdit}>Apply</button>
+          </div>
         </div>
       </div>
     `;
   }
 
-  /**
-   * Render loading overlay
-   */
   private _renderLoading(): TemplateResult {
     return html`
       <div class="loading-overlay">
@@ -393,9 +438,6 @@ export class IntuisScheduleCard extends LitElement {
     `;
   }
 
-  /**
-   * Render error message
-   */
   private _renderError(): TemplateResult {
     return html`
       <div class="error-toast" @click=${() => (this._error = undefined)}>
@@ -404,9 +446,6 @@ export class IntuisScheduleCard extends LitElement {
     `;
   }
 
-  /**
-   * Card styles
-   */
   static styles = css`
     :host {
       display: block;
@@ -438,78 +477,84 @@ export class IntuisScheduleCard extends LitElement {
       border-radius: 4px;
     }
 
-    .grid-container {
-      overflow-x: auto;
+    .schedule-container {
+      margin-bottom: 16px;
     }
 
-    .grid {
-      display: grid;
-      grid-template-columns: 50px repeat(7, 1fr);
-      gap: 2px;
-      min-width: 400px;
+    .time-axis {
+      display: flex;
+      margin-bottom: 4px;
     }
 
-    .compact .grid {
-      grid-template-columns: 40px repeat(7, 1fr);
-      min-width: 300px;
-    }
-
-    .grid-header {
-      display: contents;
-    }
-
-    .day-header {
-      text-align: center;
-      font-weight: 500;
-      font-size: 0.85em;
-      padding: 8px 4px;
-      background: var(--primary-background-color);
-    }
-
-    .grid-row {
-      display: contents;
+    .time-labels {
+      flex: 1;
+      position: relative;
+      height: 20px;
     }
 
     .time-label {
-      font-size: 0.75em;
+      position: absolute;
+      font-size: 0.7em;
       color: var(--secondary-text-color);
-      display: flex;
-      align-items: center;
-      justify-content: flex-end;
-      padding-right: 8px;
+      transform: translateX(-50%);
     }
 
-    .grid-cell {
-      min-height: 28px;
+    .day-row {
+      display: flex;
+      align-items: center;
+      margin-bottom: 4px;
+    }
+
+    .day-label {
+      width: 40px;
+      font-size: 0.85em;
+      font-weight: 500;
+      text-align: right;
+      padding-right: 8px;
+      flex-shrink: 0;
+    }
+
+    .blocks-container {
+      flex: 1;
+      position: relative;
+      height: 32px;
+      background: var(--divider-color);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .block {
+      position: absolute;
+      top: 0;
+      height: 100%;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 0.7em;
       cursor: pointer;
       transition: transform 0.1s, box-shadow 0.1s;
       border-radius: 2px;
+      overflow: hidden;
     }
 
-    .grid-cell:hover {
-      transform: scale(1.05);
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
-      z-index: 1;
+    .block:hover {
+      transform: scaleY(1.1);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+      z-index: 10;
     }
 
-    .grid-cell.current {
-      outline: 2px solid var(--primary-color);
-      outline-offset: -2px;
-    }
-
-    .compact .grid-cell {
-      min-height: 20px;
+    .block-label {
+      font-size: 0.75em;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      padding: 0 4px;
     }
 
     .legend {
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
-      margin-top: 16px;
       justify-content: center;
     }
 
@@ -527,8 +572,8 @@ export class IntuisScheduleCard extends LitElement {
       font-size: 0.9em;
     }
 
-    /* Zone Selector Dialog */
-    .zone-selector-overlay {
+    /* Editor Overlay */
+    .editor-overlay {
       position: fixed;
       top: 0;
       left: 0;
@@ -541,73 +586,120 @@ export class IntuisScheduleCard extends LitElement {
       z-index: 999;
     }
 
-    .zone-selector {
+    .editor {
       background: var(--card-background-color);
       border-radius: 12px;
-      padding: 16px;
-      min-width: 280px;
+      padding: 20px;
+      min-width: 300px;
       max-width: 90vw;
       box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
     }
 
-    .zone-selector-header {
+    .editor-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 16px;
+      margin-bottom: 20px;
+    }
+
+    .editor-title {
+      font-size: 1.1em;
       font-weight: 500;
     }
 
-    .zone-selector-time {
-      font-size: 0.85em;
+    .editor-day {
+      font-size: 0.9em;
       color: var(--secondary-text-color);
     }
 
-    .zone-selector-options {
+    .editor-times {
       display: flex;
-      flex-direction: column;
+      gap: 16px;
+    }
+
+    .editor-times .editor-section {
+      flex: 1;
+    }
+
+    .editor-section {
+      margin-bottom: 16px;
+    }
+
+    .editor-section label {
+      display: block;
+      font-size: 0.85em;
+      font-weight: 500;
+      margin-bottom: 8px;
+      color: var(--secondary-text-color);
+    }
+
+    .editor-section input[type="time"] {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid var(--divider-color);
+      border-radius: 8px;
+      font-size: 1em;
+      background: var(--card-background-color);
+      color: var(--primary-text-color);
+    }
+
+    .zone-options {
+      display: flex;
+      flex-wrap: wrap;
       gap: 8px;
     }
 
     .zone-option {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 12px 16px;
-      border: none;
+      padding: 10px 16px;
+      border: 2px solid transparent;
       border-radius: 8px;
       cursor: pointer;
-      font-size: 1em;
-      transition: transform 0.1s;
+      font-size: 0.95em;
+      font-weight: 500;
+      transition: transform 0.1s, border-color 0.1s;
     }
 
     .zone-option:hover {
-      transform: scale(1.02);
+      transform: scale(1.05);
     }
 
-    .zone-option-name {
-      font-weight: 500;
+    .zone-option.selected {
+      border-color: var(--primary-text-color);
     }
 
-    .zone-option-temps {
-      font-size: 0.85em;
-      opacity: 0.8;
+    .editor-actions {
+      display: flex;
+      gap: 12px;
+      margin-top: 20px;
     }
 
-    .zone-selector-cancel {
-      width: 100%;
-      margin-top: 16px;
+    .btn-cancel, .btn-apply {
+      flex: 1;
       padding: 12px;
-      background: var(--primary-background-color);
-      border: 1px solid var(--divider-color);
+      border: none;
       border-radius: 8px;
-      cursor: pointer;
       font-size: 1em;
-      color: var(--primary-text-color);
+      cursor: pointer;
+      transition: background-color 0.1s;
     }
 
-    .zone-selector-cancel:hover {
+    .btn-cancel {
+      background: var(--primary-background-color);
+      color: var(--primary-text-color);
+      border: 1px solid var(--divider-color);
+    }
+
+    .btn-apply {
+      background: var(--primary-color);
+      color: var(--text-primary-color, white);
+    }
+
+    .btn-cancel:hover {
       background: var(--secondary-background-color);
+    }
+
+    .btn-apply:hover {
+      opacity: 0.9;
     }
 
     /* Loading and Error states */
@@ -646,7 +738,6 @@ export class IntuisScheduleCard extends LitElement {
   `;
 }
 
-// Declare card for HA
 declare global {
   interface HTMLElementTagNameMap {
     'intuis-schedule-card': IntuisScheduleCard;
