@@ -56,9 +56,21 @@ export class IntuisScheduleCardEditor extends LitElement {
       return html`<div>Loading...</div>`;
     }
 
-    // Get all sensor entities that could be schedule summary sensors
+    // Get Intuis schedule sensor entities
+    // Valid entities: sensor.intuis_home_schedule_<schedule_name>
+    // Exclude: *_scheduled_* (room temp sensors), *_schedule_summary, *_schedule_optimization
     const entities = Object.keys(this.hass.states)
-      .filter((e) => e.startsWith('sensor.') && e.includes('schedule'))
+      .filter((e) => {
+        if (!e.startsWith('sensor.')) return false;
+        if (!e.includes('intuis')) return false;
+        // Must contain 'schedule_' (with underscore) but not 'scheduled_'
+        if (!e.includes('_schedule_')) return false;
+        if (e.includes('scheduled_')) return false;
+        // Exclude old summary and config entities
+        if (e.endsWith('_schedule_summary')) return false;
+        if (e.endsWith('_schedule_optimization')) return false;
+        return true;
+      })
       .sort();
 
     return html`

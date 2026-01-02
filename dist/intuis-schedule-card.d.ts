@@ -16,6 +16,7 @@ export declare class IntuisScheduleCard extends LitElement {
     private _getDayBlocks;
     /**
      * Handle block click - open editor
+     * Detects multi-day spans by scanning both backward and forward
      */
     private _handleBlockClick;
     /**
@@ -39,6 +40,10 @@ export declare class IntuisScheduleCard extends LitElement {
      */
     private _closeEditor;
     protected render(): TemplateResult;
+    /**
+     * Handle refresh button click - refresh schedules from API
+     */
+    private _handleRefresh;
     private _renderHeader;
     private _renderSchedule;
     private _renderTimeLabels;

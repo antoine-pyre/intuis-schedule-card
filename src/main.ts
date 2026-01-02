@@ -11,7 +11,7 @@ import { IntuisScheduleCard } from './intuis-schedule-card';
 import { IntuisScheduleCardEditor } from './intuis-schedule-editor';
 
 // Log version info
-const CARD_VERSION = '1.0.0';
+const CARD_VERSION = '1.3.0';
 console.info(
   `%c  INTUIS-SCHEDULE-CARD  %c  Version ${CARD_VERSION}  `,
   'color: white; font-weight: bold; background: #3b82f6',

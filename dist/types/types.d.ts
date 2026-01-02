@@ -57,11 +57,12 @@ export interface AvailableSchedule {
     selected: boolean;
 }
 /**
- * Attributes from sensor.intuis_home_schedule_summary
+ * Attributes from sensor.intuis_home_schedule_<name>
  */
 export interface ScheduleSummaryAttributes {
     schedule_id: string;
     is_default: boolean;
+    is_active: boolean;
     away_temperature: number;
     frost_guard_temperature: number;
     zones: Zone[];

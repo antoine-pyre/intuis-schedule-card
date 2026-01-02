@@ -151,19 +151,92 @@ export class IntuisScheduleCard extends LitElement {
 
   /**
    * Handle block click - open editor
+   * Detects multi-day spans by scanning both backward and forward
    */
   private _handleBlockClick(day: DayOfWeek, block: ScheduleBlock): void {
     const dayIndex = DAY_INDEX[day];
+    const attrs = this._getScheduleAttributes();
+
+    let startDay = day;
+    let startDayIndex = dayIndex;
+    let startTime = block.startTime;
+    let endDay = day;
+    let endDayIndex = dayIndex;
+    let endTime = block.endTime;
+    const zoneId = block.zone.id;
+
+    if (attrs) {
+      // Scan BACKWARD: If block starts at 00:00, check if previous day ends at midnight with same zone
+      if (block.startTime === '00:00') {
+        let currentDayIdx = dayIndex;
+
+        for (let i = 0; i < 7; i++) {
+          const prevDayIdx = (currentDayIdx - 1 + 7) % 7;
+          const prevDay = DAYS_OF_WEEK[prevDayIdx];
+          const prevDayBlocks = this._getDayBlocks(attrs, prevDay);
+
+          // Check if previous day ends at midnight with the same zone
+          if (prevDayBlocks.length > 0) {
+            const lastBlock = prevDayBlocks[prevDayBlocks.length - 1];
+            if (lastBlock.endTime === '00:00' && lastBlock.zone.id === zoneId) {
+              // Zone continues from previous day
+              startDay = prevDay;
+              startDayIndex = prevDayIdx;
+              startTime = lastBlock.startTime;
+
+              // If this block also starts at 00:00, keep scanning backward
+              if (lastBlock.startTime === '00:00') {
+                currentDayIdx = prevDayIdx;
+                continue;
+              }
+            }
+          }
+          // Zone doesn't continue backward, stop scanning
+          break;
+        }
+      }
+
+      // Scan FORWARD: If block ends at midnight (00:00), check if it continues into next day(s)
+      if (block.endTime === '00:00') {
+        let currentDayIdx = dayIndex;
+
+        for (let i = 0; i < 7; i++) {
+          const nextDayIdx = (currentDayIdx + 1) % 7;
+          const nextDay = DAYS_OF_WEEK[nextDayIdx];
+          const nextDayBlocks = this._getDayBlocks(attrs, nextDay);
+
+          // Check if next day starts at 00:00 with the same zone
+          if (nextDayBlocks.length > 0) {
+            const firstBlock = nextDayBlocks[0];
+            if (firstBlock.startTime === '00:00' && firstBlock.zone.id === zoneId) {
+              // Zone continues into this day
+              endDay = nextDay;
+              endDayIndex = nextDayIdx;
+              endTime = firstBlock.endTime;
+
+              // If this block also ends at midnight, keep scanning
+              if (firstBlock.endTime === '00:00') {
+                currentDayIdx = nextDayIdx;
+                continue;
+              }
+            }
+          }
+          // Zone doesn't continue forward, stop scanning
+          break;
+        }
+      }
+    }
+
     this._editor = {
       open: true,
       block,
-      startDay: day,
-      startDayIndex: dayIndex,
-      endDay: day,
-      endDayIndex: dayIndex,
-      startTime: block.startTime,
-      endTime: block.endTime === '00:00' ? '24:00' : block.endTime,
-      selectedZoneId: block.zone.id,
+      startDay: startDay,
+      startDayIndex: startDayIndex,
+      endDay: endDay,
+      endDayIndex: endDayIndex,
+      startTime: startTime,
+      endTime: endTime === '00:00' ? '24:00' : endTime,
+      selectedZoneId: zoneId,
     };
   }
 
@@ -206,68 +279,27 @@ export class IntuisScheduleCard extends LitElement {
       const startDayIdx = this._editor.startDayIndex;
       const endDayIdx = this._editor.endDayIndex;
       const zoneId = this._editor.selectedZoneId;
-      const originalZoneId = this._editor.block?.zone.id;
 
-      // Handle wrap-around (e.g., Friday to Monday)
-      const spansDays = startDayIdx !== endDayIdx ||
-        (this._editor.startTime > this._editor.endTime && this._editor.endTime !== '24:00');
+      // Get zone name for the service call
+      const attrs = this._getScheduleAttributes();
+      const selectedZone = attrs?.zones.find(z => z.id === zoneId);
+      const zoneName = selectedZone?.name || '';
 
-      if (!spansDays) {
-        // Single day edit
-        await this.hass.callService('intuis_connect', 'set_schedule_slot', {
-          day: startDayIdx,
-          start_time: this._editor.startTime,
-          zone_id: zoneId,
-        });
-
-        // Restore original zone at end time if needed
-        const endTime = this._editor.endTime === '00:00' ? '24:00' : this._editor.endTime;
-        if (endTime !== '24:00' && originalZoneId) {
-          await this.hass.callService('intuis_connect', 'set_schedule_slot', {
-            day: startDayIdx,
-            start_time: this._editor.endTime,
-            zone_id: originalZoneId,
-          });
-        }
-      } else {
-        // Multi-day span
-        // 1. Set zone at start day/time
-        await this.hass.callService('intuis_connect', 'set_schedule_slot', {
-          day: startDayIdx,
-          start_time: this._editor.startTime,
-          zone_id: zoneId,
-        });
-
-        // 2. Set zone at 00:00 for each intermediate day
-        let currentDay = (startDayIdx + 1) % 7;
-        while (currentDay !== endDayIdx) {
-          await this.hass.callService('intuis_connect', 'set_schedule_slot', {
-            day: currentDay,
-            start_time: '00:00',
-            zone_id: zoneId,
-          });
-          currentDay = (currentDay + 1) % 7;
-        }
-
-        // 3. Set zone at 00:00 for end day, then restore original zone at end time
-        if (endDayIdx !== startDayIdx) {
-          await this.hass.callService('intuis_connect', 'set_schedule_slot', {
-            day: endDayIdx,
-            start_time: '00:00',
-            zone_id: zoneId,
-          });
-        }
-
-        // Restore original zone at end time (if not end of day)
-        const endTime = this._editor.endTime === '00:00' ? '24:00' : this._editor.endTime;
-        if (endTime !== '24:00' && endTime !== '00:00' && originalZoneId) {
-          await this.hass.callService('intuis_connect', 'set_schedule_slot', {
-            day: endDayIdx,
-            start_time: this._editor.endTime,
-            zone_id: originalZoneId,
-          });
-        }
+      const startTime = this._editor.startTime;
+      let endTime = this._editor.endTime;
+      // Normalize end time: "24:00" display → "00:00" for service
+      if (endTime === '24:00') {
+        endTime = '00:00';
       }
+
+      // Single service call with start/end day support
+      await this.hass.callService('intuis_connect', 'set_schedule_slot', {
+        start_day: String(startDayIdx),
+        end_day: String(endDayIdx),
+        start_time: startTime,
+        end_time: endTime,
+        zone_name: zoneName,
+      });
 
       this._closeEditor();
     } catch (err) {
@@ -310,7 +342,7 @@ export class IntuisScheduleCard extends LitElement {
 
     return html`
       <ha-card>
-        ${this._renderHeader(attrs)}
+        ${this._renderHeader()}
         ${this._renderSchedule(attrs)}
         ${this._renderLegend(attrs)}
         ${this._editor.open ? this._renderEditor(attrs) : nothing}
@@ -320,14 +352,37 @@ export class IntuisScheduleCard extends LitElement {
     `;
   }
 
-  private _renderHeader(attrs: ScheduleSummaryAttributes): TemplateResult {
-    const title = this._config?.title || 'Heating Schedule';
+  /**
+   * Handle refresh button click - refresh schedules from API
+   */
+  private async _handleRefresh(): Promise<void> {
+    if (!this.hass || this._loading) return;
+
+    this._loading = true;
+    try {
+      await this.hass.callService('intuis_connect', 'refresh_schedules', {});
+    } catch (err) {
+      this._error = err instanceof Error ? err.message : 'Failed to refresh';
+    } finally {
+      this._loading = false;
+    }
+  }
+
+  private _renderHeader(): TemplateResult {
+    const title = this._config?.title;
     const scheduleName = this.hass?.states[this._config!.entity]?.state || 'Unknown';
 
     return html`
       <div class="card-header">
-        <div class="title">${title}</div>
-        <div class="schedule-name">${scheduleName}</div>
+        <div class="header-left">
+          ${title ? html`<div class="title">${title}</div>` : nothing}
+          <div class="schedule-name">${scheduleName}</div>
+        </div>
+        <button class="refresh-btn" @click=${this._handleRefresh} title="Refresh schedules">
+          <svg viewBox="0 0 24 24" width="20" height="20">
+            <path fill="currentColor" d="M17.65,6.35C16.2,4.9 14.21,4 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C15.73,20 18.84,17.45 19.73,14H17.65C16.83,16.33 14.61,18 12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6C13.66,6 15.14,6.69 16.22,7.78L13,11H20V4L17.65,6.35Z" />
+          </svg>
+        </button>
       </div>
     `;
   }
@@ -556,6 +611,12 @@ export class IntuisScheduleCard extends LitElement {
       margin-bottom: 16px;
     }
 
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
     .title {
       font-size: 1.2em;
       font-weight: 500;
@@ -567,6 +628,28 @@ export class IntuisScheduleCard extends LitElement {
       background: var(--primary-background-color);
       padding: 4px 8px;
       border-radius: 4px;
+    }
+
+    .refresh-btn {
+      background: none;
+      border: none;
+      padding: 8px;
+      cursor: pointer;
+      color: var(--secondary-text-color);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background-color 0.2s, color 0.2s;
+    }
+
+    .refresh-btn:hover {
+      background: var(--secondary-background-color);
+      color: var(--primary-text-color);
+    }
+
+    .refresh-btn:active {
+      background: var(--divider-color);
     }
 
     .schedule-container {
