@@ -14,7 +14,7 @@ export class IntuisScheduleCardEditor extends LitElement {
   /**
    * Fire config change event
    */
-  private _configChanged(config: IntuisScheduleCardConfig): void {
+  private _configChanged(config: Partial<IntuisScheduleCardConfig>): void {
     const event = new CustomEvent('config-changed', {
       detail: { config },
       bubbles: true,
@@ -105,6 +105,51 @@ export class IntuisScheduleCardEditor extends LitElement {
         </div>
 
         <div class="row">
+          <label>Schedule Select Entity (optional)</label>
+          <select
+            data-config="schedule_select_entity"
+            .value=${this._config.schedule_select_entity === undefined ? '__none_show__' : (this._config.schedule_select_entity === '' ? '__none_hide__' : this._config.schedule_select_entity)}
+            @change=${(e: Event) => {
+              const target = e.target as HTMLSelectElement;
+              const value = target.value;
+              if (value === '__none_show__') {
+                // Remove the property to show schedule name
+                const newConfig = { ...this._config };
+                delete newConfig.schedule_select_entity;
+                this._configChanged(newConfig);
+              } else if (value === '__none_hide__') {
+                // Set to empty string to hide schedule display
+                const newConfig = {
+                  ...this._config,
+                  schedule_select_entity: '',
+                };
+                this._configChanged(newConfig);
+              } else {
+                // Set to the selected entity
+                const newConfig = {
+                  ...this._config,
+                  schedule_select_entity: value,
+                };
+                this._configChanged(newConfig);
+              }
+            }}
+          >
+            <option value="__none_show__" ?selected=${this._config.schedule_select_entity === undefined}>None (show schedule name)</option>
+            <option value="__none_hide__" ?selected=${this._config.schedule_select_entity === ''}>None (hide schedule display)</option>
+            ${Object.keys(this.hass.states)
+              .filter((e) => e.startsWith('select.') && e.includes('schedule'))
+              .sort()
+              .map(
+                (entity) => html`
+                  <option value=${entity} ?selected=${this._config?.schedule_select_entity === entity}>
+                    ${this.hass!.states[entity]?.attributes.friendly_name || entity}
+                  </option>
+                `
+              )}
+          </select>
+        </div>
+
+        <div class="row">
           <label>Time Step</label>
           <select
             data-config="time_step"
@@ -162,6 +207,114 @@ export class IntuisScheduleCardEditor extends LitElement {
               @change=${this._valueChanged}
             />
             Compact mode (for mobile)
+          </label>
+        </div>
+
+        <div class="row">
+          <label>Row Height (px)</label>
+          <input
+            type="number"
+            data-config="row_height"
+            .value=${String(this._config.row_height ?? 32)}
+            @input=${this._valueChanged}
+            min="20"
+            max="100"
+          />
+        </div>
+
+        <div class="row checkbox">
+          <label>
+            <input
+              type="checkbox"
+              data-config="show_today_only"
+              ?checked=${this._config.show_today_only === true}
+              @change=${this._valueChanged}
+            />
+            Show today only
+          </label>
+        </div>
+
+        <div class="row">
+          <label>Temperature Mode</label>
+          <select
+            data-config="temp_mode"
+            .value=${this._config.temp_mode || 'average'}
+            @change=${this._valueChanged}
+          >
+            <option value="average">Average</option>
+            <option value="min">Minimum</option>
+            <option value="max">Maximum</option>
+            <option value="range">Range (min~max)</option>
+          </select>
+        </div>
+
+        <div class="row">
+          <label>Current Time Indicator Color</label>
+          <input
+            type="color"
+            data-config="current_time_color"
+            .value=${this._config.current_time_color || '#03a9f4'}
+            @input=${this._valueChanged}
+          />
+        </div>
+
+        <div class="row checkbox">
+          <label>
+            <input
+              type="checkbox"
+              data-config="readonly"
+              ?checked=${this._config.readonly !== false}
+              @change=${this._valueChanged}
+            />
+            Read-only mode (disable schedule editing)
+          </label>
+        </div>
+
+        <div class="row checkbox">
+          <label>
+            <input
+              type="checkbox"
+              data-config="show_detailed_tooltips"
+              ?checked=${this._config.show_detailed_tooltips !== false}
+              @change=${this._valueChanged}
+            />
+            Show detailed tooltips (room temperatures)
+          </label>
+        </div>
+
+        <div class="row checkbox">
+          <label>
+            <input
+              type="checkbox"
+              data-config="show_day_labels"
+              ?checked=${this._config.show_day_labels !== false}
+              @change=${this._valueChanged}
+            />
+            Show day labels
+          </label>
+        </div>
+
+        <div class="row checkbox">
+          <label>
+            <input
+              type="checkbox"
+              data-config="show_refresh_button"
+              ?checked=${this._config.show_refresh_button !== false}
+              @change=${this._valueChanged}
+            />
+            Show refresh button
+          </label>
+        </div>
+
+        <div class="row checkbox">
+          <label>
+            <input
+              type="checkbox"
+              data-config="show_legend"
+              ?checked=${this._config.show_legend !== false}
+              @change=${this._valueChanged}
+            />
+            Show legend
           </label>
         </div>
       </div>

@@ -10,7 +10,7 @@ export default {
   output: {
     file: 'dist/intuis-schedule-card.js',
     format: 'es',
-    sourcemap: dev ? true : false,
+    sourcemap: true,
   },
   plugins: [
     nodeResolve(),
