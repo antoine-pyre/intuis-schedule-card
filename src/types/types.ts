@@ -15,6 +15,16 @@ export interface IntuisScheduleCardConfig extends LovelaceCardConfig {
   show_temperatures?: boolean;
   compact?: boolean;
   zone_colors?: Record<string, string>;
+  row_height?: number;
+  show_today_only?: boolean;
+  temp_mode?: 'average' | 'min' | 'max' | 'range';
+  schedule_select_entity?: string;
+  current_time_color?: string;
+  readonly?: boolean;
+  show_detailed_tooltips?: boolean;
+  show_day_labels?: boolean;
+  show_refresh_button?: boolean;
+  show_legend?: boolean;
 }
 
 /**

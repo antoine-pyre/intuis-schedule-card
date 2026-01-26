@@ -16,6 +16,15 @@ const DEFAULT_CONFIG: Partial<IntuisScheduleCardConfig> = {
   start_hour: 0,
   end_hour: 24,
   show_temperatures: true,
+  row_height: 32,
+  show_today_only: false,
+  temp_mode: 'average',
+  current_time_color: '#03a9f4',
+  readonly: false,
+  show_detailed_tooltips: true,
+  show_day_labels: true,
+  show_refresh_button: true,
+  show_legend: true,
 };
 
 // Block represents a continuous time range with the same zone
@@ -46,6 +55,7 @@ export class IntuisScheduleCard extends LitElement {
   @state() private _config?: IntuisScheduleCardConfig;
   @state() private _loading = false;
   @state() private _error?: string;
+  @state() private _currentTime = new Date();
   @state() private _editor: BlockEditorState = {
     open: false,
     block: null,
@@ -57,6 +67,7 @@ export class IntuisScheduleCard extends LitElement {
     endTime: '',
     selectedZoneId: null,
   };
+  private _timeUpdateInterval?: number;
 
   public setConfig(config: IntuisScheduleCardConfig): void {
     if (!config.entity) {
@@ -69,15 +80,78 @@ export class IntuisScheduleCard extends LitElement {
     return 8;
   }
 
+  connectedCallback(): void {
+    super.connectedCallback();
+    // Update current time every minute
+    this._updateCurrentTime();
+    this._timeUpdateInterval = window.setInterval(() => {
+      this._updateCurrentTime();
+    }, 60000); // Update every minute
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    if (this._timeUpdateInterval) {
+      clearInterval(this._timeUpdateInterval);
+      this._timeUpdateInterval = undefined;
+    }
+  }
+
+  private _updateCurrentTime(): void {
+    this._currentTime = new Date();
+  }
+
   protected shouldUpdate(changedProps: PropertyValues): boolean {
     if (!this._config) return true;
     if (changedProps.has('hass') && this.hass) {
       const oldHass = changedProps.get('hass') as HomeAssistant | undefined;
       if (!oldHass) return true;
       const entityId = this._config.entity;
-      return oldHass.states[entityId] !== this.hass.states[entityId];
+      const scheduleSelectEntity = this._config.schedule_select_entity;
+      
+      // Update if main entity changed
+      if (oldHass.states[entityId] !== this.hass.states[entityId]) {
+        return true;
+      }
+      
+      // Update if schedule select entity changed
+      if (scheduleSelectEntity && oldHass.states[scheduleSelectEntity] !== this.hass.states[scheduleSelectEntity]) {
+        return true;
+      }
     }
     return true;
+  }
+
+  /**
+   * Get translated day name based on browser language
+   */
+  private _getDayName(day: DayOfWeek, short: boolean = true): string {
+    const language = this.hass?.language || navigator.language || 'en';
+    const lang = language.split('-')[0].toLowerCase(); // Get base language (e.g., 'fr' from 'fr-FR')
+    
+    const dayTranslations: Record<string, Record<DayOfWeek, { short: string; long: string }>> = {
+      fr: {
+        Monday: { short: 'Lun', long: 'Lundi' },
+        Tuesday: { short: 'Mar', long: 'Mardi' },
+        Wednesday: { short: 'Mer', long: 'Mercredi' },
+        Thursday: { short: 'Jeu', long: 'Jeudi' },
+        Friday: { short: 'Ven', long: 'Vendredi' },
+        Saturday: { short: 'Sam', long: 'Samedi' },
+        Sunday: { short: 'Dim', long: 'Dimanche' },
+      },
+      en: {
+        Monday: { short: 'Mon', long: 'Monday' },
+        Tuesday: { short: 'Tue', long: 'Tuesday' },
+        Wednesday: { short: 'Wed', long: 'Wednesday' },
+        Thursday: { short: 'Thu', long: 'Thursday' },
+        Friday: { short: 'Fri', long: 'Friday' },
+        Saturday: { short: 'Sat', long: 'Saturday' },
+        Sunday: { short: 'Sun', long: 'Sunday' },
+      },
+    };
+
+    const translations = dayTranslations[lang] || dayTranslations.en;
+    return short ? translations[day].short : translations[day].long;
   }
 
   private _getScheduleAttributes(): ScheduleSummaryAttributes | null {
@@ -88,6 +162,28 @@ export class IntuisScheduleCard extends LitElement {
       return null;
     }
     return entityState.attributes as unknown as ScheduleSummaryAttributes;
+  }
+
+  /**
+   * Get the active zone at a specific time for a given day
+   */
+  private _getActiveZoneAtTime(attrs: ScheduleSummaryAttributes, day: DayOfWeek, timeMinutes: number): Zone | null {
+    const blocks = this._getDayBlocks(attrs, day);
+    for (const block of blocks) {
+      // Handle blocks that span midnight
+      if (block.startMinutes > block.endMinutes) {
+        // Block spans midnight (e.g., 22:00 to 06:00)
+        if (timeMinutes >= block.startMinutes || timeMinutes < block.endMinutes) {
+          return block.zone;
+        }
+      } else {
+        // Normal block
+        if (timeMinutes >= block.startMinutes && timeMinutes < block.endMinutes) {
+          return block.zone;
+        }
+      }
+    }
+    return null;
   }
 
   /**
@@ -340,11 +436,13 @@ export class IntuisScheduleCard extends LitElement {
       `;
     }
 
+    const showLegend = this._config?.show_legend !== false; // Default to true
+
     return html`
       <ha-card>
         ${this._renderHeader()}
         ${this._renderSchedule(attrs)}
-        ${this._renderLegend(attrs)}
+        ${showLegend ? this._renderLegend(attrs) : nothing}
         ${this._editor.open ? this._renderEditor(attrs) : nothing}
         ${this._loading ? this._renderLoading() : nothing}
         ${this._error && !this._editor.open ? this._renderError() : nothing}
@@ -368,29 +466,109 @@ export class IntuisScheduleCard extends LitElement {
     }
   }
 
-  private _renderHeader(): TemplateResult {
+  private _renderHeader(): TemplateResult | typeof nothing {
     const title = this._config?.title;
-    const scheduleName = this.hass?.states[this._config!.entity]?.state || 'Unknown';
+    const scheduleSelectEntity = this._config?.schedule_select_entity;
+    
+    // Handle schedule display:
+    // - If schedule_select_entity is empty string (""), show nothing
+    // - If schedule_select_entity is undefined/null, show schedule name (read-only)
+    // - If schedule_select_entity is provided, show select dropdown
+    let scheduleDisplay: TemplateResult | typeof nothing = nothing;
+    if (scheduleSelectEntity === '') {
+      // Empty string means hide schedule display
+      scheduleDisplay = nothing;
+    } else if (scheduleSelectEntity && this.hass) {
+      // Entity provided, show select dropdown
+      const selectEntity = this.hass.states[scheduleSelectEntity];
+      if (selectEntity) {
+        const currentValue = selectEntity.state;
+        const options = (selectEntity.attributes.options as string[]) || [];
+        scheduleDisplay = html`
+          <select 
+            class="schedule-select"
+            .value=${currentValue}
+            @change=${(e: Event) => this._handleScheduleChange((e.target as HTMLSelectElement).value)}
+          >
+            ${options.map(option => html`
+              <option value=${option} ?selected=${option === currentValue}>${option}</option>
+            `)}
+          </select>
+        `;
+      } else {
+        scheduleDisplay = html`<div class="schedule-name">Entity not found</div>`;
+      }
+    } else {
+      // No entity specified, show schedule name (read-only)
+      const scheduleName = this.hass?.states[this._config!.entity]?.state || 'Unknown';
+      scheduleDisplay = html`<div class="schedule-name">${scheduleName}</div>`;
+    }
+
+    const showRefreshButton = this._config?.show_refresh_button !== false; // Default to true
+    
+    // Check if header has any content
+    const hasTitle = !!title;
+    const hasScheduleDisplay = scheduleDisplay !== nothing;
+    const hasContent = hasTitle || hasScheduleDisplay || showRefreshButton;
+    
+    // If no content, don't render the header at all
+    if (!hasContent) {
+      return nothing;
+    }
 
     return html`
-      <div class="card-header">
+      <div class="card-header ${!hasTitle && !hasScheduleDisplay ? 'compact' : ''}">
         <div class="header-left">
           ${title ? html`<div class="title">${title}</div>` : nothing}
-          <div class="schedule-name">${scheduleName}</div>
+          ${scheduleDisplay}
         </div>
-        <button class="refresh-btn" @click=${this._handleRefresh} title="Refresh schedules">
-          <svg viewBox="0 0 24 24" width="20" height="20">
-            <path fill="currentColor" d="M17.65,6.35C16.2,4.9 14.21,4 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C15.73,20 18.84,17.45 19.73,14H17.65C16.83,16.33 14.61,18 12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6C13.66,6 15.14,6.69 16.22,7.78L13,11H20V4L17.65,6.35Z" />
-          </svg>
-        </button>
+        ${showRefreshButton ? html`
+          <button class="refresh-btn" @click=${this._handleRefresh} title="Refresh schedules">
+            <svg viewBox="0 0 24 24" width="20" height="20">
+              <path fill="currentColor" d="M17.65,6.35C16.2,4.9 14.21,4 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C15.73,20 18.84,17.45 19.73,14H17.65C16.83,16.33 14.61,18 12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6C13.66,6 15.14,6.69 16.22,7.78L13,11H20V4L17.65,6.35Z" />
+            </svg>
+          </button>
+        ` : nothing}
       </div>
     `;
+  }
+
+  /**
+   * Handle schedule selection change
+   */
+  private async _handleScheduleChange(option: string): Promise<void> {
+    const scheduleSelectEntity = this._config?.schedule_select_entity;
+    if (!this.hass || !scheduleSelectEntity) return;
+
+    this._loading = true;
+    this._error = undefined;
+
+    try {
+      await this.hass.callService('select', 'select_option', {
+        option: option,
+        entity_id: scheduleSelectEntity,
+      });
+    } catch (err) {
+      this._error = err instanceof Error ? err.message : 'Failed to change schedule';
+    } finally {
+      this._loading = false;
+    }
   }
 
   private _renderSchedule(attrs: ScheduleSummaryAttributes): TemplateResult {
     const startHour = this._config?.start_hour ?? 0;
     const endHour = this._config?.end_hour ?? 24;
     const totalMinutes = (endHour - startHour) * 60;
+    const showTodayOnly = this._config?.show_today_only ?? false;
+
+    // Get days to display
+    let daysToDisplay: readonly DayOfWeek[] = DAYS_OF_WEEK;
+    if (showTodayOnly) {
+      const today = new Date().getDay(); // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
+      // Convert to our day index (Monday = 0)
+      const dayIndex = today === 0 ? 6 : today - 1;
+      daysToDisplay = [DAYS_OF_WEEK[dayIndex]] as readonly DayOfWeek[];
+    }
 
     return html`
       <div class="schedule-container">
@@ -403,7 +581,7 @@ export class IntuisScheduleCard extends LitElement {
         </div>
 
         <!-- Days -->
-        ${DAYS_OF_WEEK.map(day => this._renderDayRow(attrs, day, startHour, totalMinutes))}
+        ${daysToDisplay.map(day => this._renderDayRow(attrs, day, startHour, totalMinutes))}
       </div>
     `;
   }
@@ -427,12 +605,32 @@ export class IntuisScheduleCard extends LitElement {
   ): TemplateResult {
     const blocks = this._getDayBlocks(attrs, day);
     const startMinutes = startHour * 60;
-    const shortDay = day.substring(0, 3);
+    const showDayLabels = this._config?.show_day_labels !== false; // Default to true
+    const dayName = showDayLabels ? this._getDayName(day, true) : '';
+    const rowHeight = this._config?.row_height ?? 32;
+
+    // Calculate current time indicator position
+    const now = this._currentTime;
+    const currentDay = now.getDay(); // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
+    const currentDayIndex = currentDay === 0 ? 6 : currentDay - 1; // Convert to our index (Monday = 0)
+    const dayIndex = DAY_INDEX[day];
+    const isCurrentDay = dayIndex === currentDayIndex;
+    
+    const currentHour = now.getHours();
+    const currentMinute = now.getMinutes();
+    const currentTimeMinutes = currentHour * 60 + currentMinute;
+    
+    // Calculate position of current time indicator
+    const shouldShowIndicator = isCurrentDay && currentTimeMinutes >= startMinutes && currentTimeMinutes < startMinutes + totalMinutes;
+    const activeZone = shouldShowIndicator ? this._getActiveZoneAtTime(attrs, day, currentTimeMinutes) : null;
+    const position = shouldShowIndicator ? ((currentTimeMinutes - startMinutes) / totalMinutes) * 100 : 0;
+    const zoneName = activeZone?.name || 'Unknown';
+    const zoneTemp = activeZone ? this._getZoneTempDisplay(activeZone) : '';
 
     return html`
       <div class="day-row">
-        <div class="day-label">${shortDay}</div>
-        <div class="blocks-container">
+        ${showDayLabels ? html`<div class="day-label">${dayName}</div>` : html`<div class="day-label" style="width: 0; padding: 0;"></div>`}
+        <div class="blocks-container" style="height: ${rowHeight}px;">
           ${blocks.map(block => {
             // Calculate position and width based on visible time range
             const blockStart = Math.max(block.startMinutes, startMinutes);
@@ -445,20 +643,37 @@ export class IntuisScheduleCard extends LitElement {
 
             const color = getZoneColor(block.zone, this._config?.zone_colors, attrs.zones.indexOf(block.zone));
             const textColor = getContrastTextColor(color);
-            const duration = blockEnd - blockStart;
             const showLabel = width > 8; // Only show label if block is wide enough
 
+            const isReadonly = this._config?.readonly !== false; // Default to true
+            const showDetailedTooltips = this._config?.show_detailed_tooltips !== false; // Default to true
+            const endTimeDisplay = block.endTime === '00:00' ? '24:00' : block.endTime;
+            const tooltip = showDetailedTooltips 
+              ? this._getZoneDetailedTooltip(block.zone, block.startTime, endTimeDisplay)
+              : `${block.zone.name}: ${block.startTime} - ${endTimeDisplay}`;
             return html`
               <div
-                class="block"
+                class="block ${isReadonly ? 'readonly' : ''}"
                 style="left: ${left}%; width: ${width}%; background-color: ${color}; color: ${textColor}"
-                @click=${() => this._handleBlockClick(day, block)}
-                title="${block.zone.name}: ${block.startTime} - ${block.endTime === '00:00' ? '24:00' : block.endTime}"
+                @click=${isReadonly ? undefined : () => this._handleBlockClick(day, block)}
+                title="${tooltip}"
               >
                 ${showLabel ? html`<span class="block-label">${block.zone.name}</span>` : nothing}
               </div>
             `;
           })}
+          ${shouldShowIndicator ? html`
+            <div 
+              class="current-time-indicator"
+              style="left: ${position}%"
+              title="${currentHour.toString().padStart(2, '0')}:${currentMinute.toString().padStart(2, '0')} - ${zoneName} ${zoneTemp}"
+            >
+              <div 
+                class="current-time-line"
+                style="background-color: ${this._config?.current_time_color || '#03a9f4'}; box-shadow: 0 0 4px ${this._config?.current_time_color || '#03a9f4'}80;"
+              ></div>
+            </div>
+          ` : nothing}
         </div>
       </div>
     `;
@@ -471,11 +686,19 @@ export class IntuisScheduleCard extends LitElement {
           const color = getZoneColor(zone, this._config?.zone_colors, index);
           const textColor = getContrastTextColor(color);
 
+          const showDetailedTooltips = this._config?.show_detailed_tooltips !== false; // Default to true
+          const tooltip = showDetailedTooltips 
+            ? this._getZoneDetailedTooltip(zone)
+            : zone.name;
           return html`
-            <div class="legend-item" style="background-color: ${color}; color: ${textColor}">
+            <div 
+              class="legend-item" 
+              style="background-color: ${color}; color: ${textColor}"
+              title="${tooltip}"
+            >
               ${zone.name}
               ${this._config?.show_temperatures
-                ? html`<span class="legend-temp">${this._getAverageTemp(zone)}°</span>`
+                ? html`<span class="legend-temp">${this._getZoneTempDisplay(zone)}</span>`
                 : nothing}
             </div>
           `;
@@ -484,14 +707,120 @@ export class IntuisScheduleCard extends LitElement {
     `;
   }
 
-  private _getAverageTemp(zone: Zone): number {
+  private _getZoneTemp(zone: Zone): number | string {
     const temps = Object.values(zone.room_temperatures);
     if (temps.length === 0) return 0;
-    return Math.round(temps.reduce((a, b) => a + b, 0) / temps.length);
+    
+    const mode = this._config?.temp_mode ?? 'average';
+    
+    switch (mode) {
+      case 'min':
+        return Math.round(Math.min(...temps));
+      case 'max':
+        return Math.round(Math.max(...temps));
+      case 'range':
+        const min = Math.round(Math.min(...temps));
+        const max = Math.round(Math.max(...temps));
+        return `${min}°~${max}°`;
+      case 'average':
+      default:
+        return Math.round(temps.reduce((a, b) => a + b, 0) / temps.length);
+    }
+  }
+
+  private _getZoneTempDisplay(zone: Zone): string {
+    const temp = this._getZoneTemp(zone);
+    // If it's already a string (range mode), return it as is
+    if (typeof temp === 'string') {
+      return temp;
+    }
+    // Otherwise, add the degree symbol
+    return `${temp}°`;
+  }
+
+  /**
+   * Get room name from Home Assistant entities
+   */
+  private _getRoomName(roomId: string): string {
+    let roomName = roomId;
+    
+    // Clean up room ID for display (replace underscores with spaces, capitalize)
+    roomName = roomId
+      .replace(/_/g, ' ')
+      .split(' ')
+      .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+      .join(' ');
+    
+    if (this.hass) {
+      // Look for sensor entities that might contain the room name or ID
+      const searchTerms = [roomId, roomId.replace(/_/g, ' '), roomName.toLowerCase()];
+      const sensorEntity = Object.keys(this.hass.states).find(
+        e => {
+          const entityLower = e.toLowerCase();
+          return searchTerms.some(term => entityLower.includes(term.toLowerCase()));
+        }
+      );
+      if (sensorEntity) {
+        const friendlyName = this.hass.states[sensorEntity]?.attributes?.friendly_name;
+        if (friendlyName && typeof friendlyName === 'string') {
+          roomName = friendlyName;
+        }
+      }
+    }
+    
+    return roomName;
+  }
+
+  /**
+   * Get detailed temperatures tooltip for a zone with time range
+   */
+  private _getZoneDetailedTooltip(zone: Zone, startTime?: string, endTime?: string): string {
+    const roomTemps = zone.room_temperatures;
+    if (!roomTemps || Object.keys(roomTemps).length === 0) {
+      const timeRange = startTime && endTime ? ` (${startTime} - ${endTime})` : '';
+      return `${zone.name}${timeRange}\n`;
+    }
+
+    // Build header with time range if provided
+    const timeRange = startTime && endTime ? ` (${startTime} - ${endTime})` : '';
+    const lines: string[] = [`${zone.name}${timeRange}`];
+    
+    // Get room entries with friendly names
+    const roomEntries = Object.entries(roomTemps)
+      .map(([roomId, temp]) => ({
+        name: this._getRoomName(roomId),
+        temp: Math.round(temp),
+      }))
+      .sort((a, b) => {
+        // Sort by temperature first, then by name
+        if (a.temp !== b.temp) {
+          return a.temp - b.temp;
+        }
+        return a.name.localeCompare(b.name);
+      });
+
+    // Group rooms by temperature
+    const groupedByTemp = new Map<number, string[]>();
+    roomEntries.forEach(({ name, temp }) => {
+      if (!groupedByTemp.has(temp)) {
+        groupedByTemp.set(temp, []);
+      }
+      groupedByTemp.get(temp)!.push(name);
+    });
+
+    // Build lines with grouped rooms
+    Array.from(groupedByTemp.entries())
+      .sort(([tempA], [tempB]) => tempA - tempB)
+      .forEach(([temp, roomNames]) => {
+        const roomsList = roomNames.join(', ');
+        lines.push(`${roomsList}: ${temp}°C`);
+      });
+
+    return lines.join('\n');
   }
 
   private _renderEditor(attrs: ScheduleSummaryAttributes): TemplateResult {
-    const shortDays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const shortDays = DAYS_OF_WEEK.map(day => this._getDayName(day, true));
 
     return html`
       <div class="editor-overlay" @click=${this._closeEditor}>
@@ -609,12 +938,24 @@ export class IntuisScheduleCard extends LitElement {
       justify-content: space-between;
       align-items: center;
       margin-bottom: 16px;
+      min-height: 0;
+    }
+
+    .card-header.compact {
+      margin-bottom: 8px;
+      min-height: 0;
     }
 
     .header-left {
       display: flex;
       align-items: center;
       gap: 12px;
+      min-width: 0;
+      flex: 1;
+    }
+
+    .header-left:empty {
+      display: none;
     }
 
     .title {
@@ -628,6 +969,26 @@ export class IntuisScheduleCard extends LitElement {
       background: var(--primary-background-color);
       padding: 4px 8px;
       border-radius: 4px;
+    }
+
+    .schedule-select {
+      font-size: 0.9em;
+      padding: 4px 8px;
+      border: 1px solid var(--divider-color);
+      border-radius: 4px;
+      background: var(--card-background-color);
+      color: var(--primary-text-color);
+      cursor: pointer;
+      min-width: 120px;
+    }
+
+    .schedule-select:focus {
+      outline: none;
+      border-color: var(--primary-color);
+    }
+
+    .schedule-select:hover {
+      border-color: var(--primary-color);
     }
 
     .refresh-btn {
@@ -692,10 +1053,9 @@ export class IntuisScheduleCard extends LitElement {
     .blocks-container {
       flex: 1;
       position: relative;
-      height: 32px;
       background: var(--divider-color);
       border-radius: 4px;
-      overflow: hidden;
+      overflow: visible;
     }
 
     .block {
@@ -711,7 +1071,40 @@ export class IntuisScheduleCard extends LitElement {
       overflow: hidden;
     }
 
-    .block:hover {
+    .block.readonly {
+      cursor: default;
+    }
+
+    .current-time-indicator {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      z-index: 100;
+      pointer-events: none;
+      transform: translateX(-50%);
+    }
+
+    .current-time-line {
+      position: absolute;
+      top: -2px;
+      bottom: -2px;
+      left: 50%;
+      width: 2px;
+      transform: translateX(-50%);
+      animation: blink 1s infinite;
+    }
+
+    @keyframes blink {
+      0%, 100% {
+        opacity: 1;
+      }
+      50% {
+        opacity: 0.3;
+      }
+    }
+
+    .block:hover:not(.readonly) {
       transform: scaleY(1.1);
       box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
       z-index: 10;
